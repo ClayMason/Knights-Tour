@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <assert.h>
+#include <stdbool.h>
 
 typedef struct {
   char** board;
@@ -27,11 +28,15 @@ int board_height;
 pthread_mutex_t tour_size_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t dead_end_tours_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void init_board (char** board, int width, int height);
-void copy_board (char** board, char** destination);
-void tour (char** board_, int x_pos, int y_pos, ssize_t move_number);
-int fill_count (char** board);
-void tour (void* args);
+void debug_print_board (char** board, int width, int height);
+void print_board (char** board, int width, int height); // done
+void init_board (char*** board, int width, int height); // done
+void copy_board (char** board, int width, int height, char*** destination); // done
+bool tour (char** board_, int x_pos, int y_pos, ssize_t move_number); // done
+int fill_count (char** board); // done
+void * thread_tour (void* args); // done
+bool fill_board (char*** board, int col, int row, char fill_char); // done
+int possible_moves (char** current_board, int x_pos, int y_pos, int** possible_positions); // done
 
 int main (int argc, char** argv) {
 
@@ -56,67 +61,86 @@ int main (int argc, char** argv) {
   }
 
   // successfully set up variables
-  printf ("THREAD %li: Solving Sonny's knight's tour problem for a %dx%d board\n", pthread_self(), board_width, board_height);
+  printf ("THREAD %lu: Solving Sonny's knight's tour problem for a %dx%d board\n", (unsigned long) pthread_self(), board_width, board_height);
 
   // initialize board
   // [Dealloc reminder!]
   char** chess_board;
-  init_board (chess_board, board_width, board_height);
+  init_board (&chess_board, board_width, board_height);
 
   // start the tour...
-  tour (chess_board, 0, 0, 0);
+  tour (chess_board, 0, 0, 1);
+
+  // end of simulation
+  printf ("Completed simulation...\n");
 
   return 0;
 }
 
-void tour (void* args) {
+void * thread_tour (void* args) {
 
   // beginning of thread
   tour_args* arguments = (tour_args*) args;
-  tour (arguments->board, arguments->x_pos, arguments->y_pos, arguments->move_number);
+  bool should_return = tour (arguments->board, arguments->x_pos, arguments->y_pos, arguments->move_number);
 
   // exit the thread -- return the move number
-  pthread_exit ((void *) tour_args->move_number);
+  if ( should_return) pthread_exit ((void *) arguments->move_number);
+  else pthread_exit(NULL);
 }
 
-void tour (char** board_, int x_pos, int y_pos, ssize_t move_number) {
+bool tour (char** board_, int x_pos, int y_pos, ssize_t move_number) {
   // fill the x_pos and y_pos on the board
 
-  // copy board then fill TODO: copy!!!
   char** board;
-  copy_board (board_, board_width, board_height, board);
-  fill_board (board, x_pos, y_pos, 1);
+  copy_board (board_, board_width, board_height, &board);
+  fill_board (&board, x_pos, y_pos, 1);
 
-  move_number += 1;
+  // print debug board
+  // debug_print_board (board, board_width, board_height);
+
+  // move_number += 1;
   int* possible_positions;
-  int possible_moves_ = possible_moves (board, x_pos, y_pos, possible_positions);
-  void* thread_return_val;
+  int possible_moves_ = possible_moves (board, x_pos, y_pos, &possible_positions);
+  void* thread_return_val = NULL;
 
   if ( possible_moves_ > 0 ) {
     // log possible positions
-    printf ("THREAD %li: %d moves possible after move #%d; creating threads\n", pthread_self(), possible_moves, move_number);
-    thread_t tid_arr[possible_moves];
+    if (possible_moves_ > 1)
+      printf ("THREAD %lu: %d moves possible after move #%zd; creating threads...\n", (unsigned long) pthread_self(), possible_moves_, move_number);
 
-    for (int i = 0; i < possible_moves; ++i){
+    pthread_t tid_arr[possible_moves_];
+
+    for (int i = 0; i < possible_moves_; ++i){
       // create all the threads
       tour_args new_args;
-      new_args->board = board;
+      new_args.board = board;
       // row, then col, in possible_positions
-      new_args->y_pos = *(possible_positions+(2*i));
-      new_args->x_pos = *(possible_positions+(2*i+1));
-      new_args->move_number = move_number + 1;
+      new_args.y_pos = *(possible_positions+(2*i));
+      new_args.x_pos = *(possible_positions+(2*i+1));
+      new_args.move_number = move_number + 1;
 
-      if (pthread_create ( &(tid_arr[i]), NULL, tour, (void*) &new_args ) != 0 ){
+      if (pthread_create ( &(tid_arr[i]), NULL, thread_tour, (void*) &new_args ) != 0 ){
         fprintf (stderr, "Error: could not create thread... terminating.\n");
         exit (2);
       }
-    } // end of for
-  }
+      #ifdef NO_PARALLEL
+      pthread_join (tid_arr[i], &thread_return_val);
+      if (thread_return_val != NULL)
+        printf ("THREAD %lu: Thread [%li] joined (returned %zd)\n", (unsigned long) pthread_self(), (unsigned long) tid_arr[i], (ssize_t) thread_return_val);
 
-  // join all the threads created back with the instantiating thread...
-  for (int i = 0; i < possible_moves; ++i) {
-    pthread_join (tid_arr[i], &thread_return_val);
-    printf ("Thread [%li] joined (returned %d)\n", tid_arr[i], thread_return_val);
+      #endif
+
+    } // end of for
+
+    // join all the threads created back with the instantiating thread...
+    #ifndef NO_PARALLEL
+    for (int i = 0; i < possible_moves_; ++i) {
+      pthread_join (tid_arr[i], &thread_return_val);
+      if (thread_return_val != NULL)
+        printf ("THREAD %lu: Thread [%li] joined (returned %zd)\n", (unsigned long) pthread_self(), (unsigned long) tid_arr[i], (ssize_t) thread_return_val);
+    }
+    #endif
+
   }
 
   else {
@@ -124,13 +148,16 @@ void tour (char** board_, int x_pos, int y_pos, ssize_t move_number) {
     // determine if dead end or full knight
     if (fill_count(board) == board_width * board_height) {
       // board filled
-      printf ("Thread %li: Sonny found a full knight's tour!\n", pthread_self());
+      printf ("THREAD %lu: Sonny found a full knight's tour!\n", (unsigned long) pthread_self());
     }
     else {
-      printf ("Thread %li: Dead end after move #%d\n", pthread_self(), move_number);
+      printf ("THREAD %lu: Dead end after move #%zd\n", (unsigned long) pthread_self(), move_number);
     }
+
+    return true;
   }
 
+  return false;
 } // end of tour
 
 int fill_count (char** board) {
@@ -147,23 +174,52 @@ int fill_count (char** board) {
   return count_;
 }
 
-void init_board (char** board, int width, int height) {
+void debug_print_board (char** board, int width, int height) {
+  for ( int i = 0; i < height; ++i ) {
+    printf ("THREAD %lu: ", (unsigned long) pthread_self());
+    for ( int j = 0; j < width; ++j ) {
+      int val = (int) *(*(board+i)+j);
+
+      printf ("[%d] ", val );
+    }
+    printf ("\n");
+  }
+}
+
+void print_board (char** board, int width, int height) {
+  for ( int i = 0; i < height; ++i ) {
+    for ( int j = 0; j < width; ++j ) {
+
+      int val = (int) *(*(board+i)+j);
+
+      printf ("[%d] ", val );
+    }
+    printf ("\n");
+  }
+}
+
+void init_board (char*** board, int width, int height) {
   // initialize a new board of dimensions width x height and return it into board pointer
   // [Dealloc reminder!]
 
-  board = (char**) calloc (height, sizeof(char*));
-  for (int i = 0; i < height; ++i)
-    *(board+i) = (char*) calloc (width, sizeof(char));
+   *(board) = (char**) calloc (height, sizeof(char*));
+  for (int i = 0; i < height; ++i) {
+     *(*(board)+i) = (char*) calloc (width, sizeof(char));
+  }
 }
 
-void copy_board (char** board, int width, int height, char** destination) {
+void copy_board (char** board, int width, int height, char*** destination) {
   init_board (destination, width, height);
 
+  // DEBUG...
   for ( int row_ = 0; row_ < height; ++ row_ ) {
     for ( int col_ = 0; col_ < width; ++ col_ ) {
-      destination[row_][col_] = board[row_][col_];
+      // printf ("Coying row: %d, col %d (width: %d, height: %d)\n", row_, col_, width, height);
+      // destination[row_][col_] = board[row_][col_];
+      *(*(*(destination)+row_)+col_) = *(*(board + row_) + col_);
     }
   }
+
 }
 
 bool in_bounds (char** board, int col, int row) {
@@ -179,19 +235,19 @@ bool is_filled (char** board, int col, int row) {
   return *( board_row+col ) != 0; // 1 or 2 means filled; 0 means empty
 }
 
-bool fill_board (char** board, int col, int row, char fill_char) {
+bool fill_board (char*** board, int col, int row, char fill_char) {
   assert (col < board_width);
   assert (col >= 0);
   assert (row < board_height);
   assert (row >= 0);
 
-  if ( is_filled (board, col, row) ) return false;
-  *(*(board+row)+col) = fill_char;
+  if ( is_filled (*board, col, row) ) return false;
+  *(*(*(board)+row)+col) = fill_char;
 
   return true;
 }
 
-int possible_moves (char** current_board, int x_pos, int y_pos, int* possible_positions) {
+int possible_moves (char** current_board, int x_pos, int y_pos, int** possible_positions) {
   // given a current board with an x and y position, determine which positions the knight can occupy as a next move (and store in possible_positions)
   // and return the amount of possible moves found.
 
@@ -207,7 +263,7 @@ int possible_moves (char** current_board, int x_pos, int y_pos, int* possible_po
 
   int i, next_row, next_col;
   int possible_moves_ = 0;
-  possible_positions = (int*) calloc (16, sizeof(int));
+  *possible_positions = (int*) calloc (16, sizeof(int));
 
   for ( i = 0; i < 16; i+=2 ) {
     next_row = y_pos + *(moves+i);
@@ -215,14 +271,15 @@ int possible_moves (char** current_board, int x_pos, int y_pos, int* possible_po
 
     // check if the position is free to occupy
     if ( in_bounds(current_board, next_col, next_row) && !is_filled(current_board, next_col, next_row) ) {
-      *(possible_positions+(2*possible_moves_) ) = next_row;
-      *(possible_positions+(2*possible_moves_+1) ) = next_col;
+      *(*possible_positions+(2*possible_moves_) ) = next_row;
+      *(*possible_positions+(2*possible_moves_+1) ) = next_col;
       ++ possible_moves_;
     }
   }
 
   // shorten the size of possible_positions
-  possible_positions = (int*) realloc (possible_positions, possible_moves_ * 2);
+  // printf ("Possible moves: %d\n", possible_moves_);
+  *possible_positions = (int*) realloc (*possible_positions, possible_moves_ * 2);
 
   return possible_moves_;
 }
